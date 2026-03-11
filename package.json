@@ -1,0 +1,52 @@
+{
+  "name": "desktop-pet",
+  "version": "1.0.0",
+  "description": "Electron桌面宠物应用 - 支持动画分组、待办事项、气泡提示",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.desktoppet.app",
+    "productName": "桌面宠物",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "img/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "img",
+        "to": "img"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "img/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "shortcutName": "桌面宠物"
+    }
+  },
+  "devDependencies": {
+    "@electron/packager": "^18.4.4",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.38",
+    "marked": "^4.3.0"
+  }
+}

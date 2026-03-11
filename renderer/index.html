@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>桌面宠物</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- 代码高亮样式 -->
+  <link rel="stylesheet" href="../node_modules/highlight.js/styles/github.css" />
+  <!-- KaTeX 数学公式样式 -->
+  <link rel="stylesheet" href="../node_modules/katex/dist/katex.min.css" />
+</head>
+<body>
+  <!-- 宠物容器 -->
+  <div id="pet-container">
+    <img class="pet-image" draggable="false" alt="pet" />
+  </div>
+
+  <!-- 气泡提示 -->
+  <div id="bubble" class="bubble">
+    <span class="bubble-text"></span>
+    <span class="bubble-check" title="完成此待办">✓</span>
+  </div>
+
+  <!-- AI 聊天面板 -->
+  <div id="chat-panel" class="chat-panel"></div>
+
+  <!-- 菜单遮罩层（点击任意地方关闭菜单） -->
+  <div id="menu-overlay" class="menu-overlay"></div>
+
+  <!-- 右键菜单 -->
+  <div id="context-menu" class="context-menu"></div>
+
+  <!-- 快捷启动菜单（宠物左侧） -->
+  <div id="quick-launch" class="quick-launch"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
