@@ -410,31 +410,37 @@ const DISK_SIZE = '4G';
 const VM_MEMORY = '512';
 const ALPINE_ISO_URL = 'https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.6-x86_64.iso';
 
-/** 查找 QEMU 可执行文件 */
+/** 查找 QEMU 可执行文件（跨平台） */
 function findQemu() {
-  // 检查 PATH
-  try {
-    const result = execSync('where.exe qemu-system-x86_64', { timeout: 5000, stdio: 'pipe' });
-    return result.toString().trim().split('\n')[0].trim();
-  } catch (_) {}
-
-  // 常见安装位置
-  const locations = [
-    'C:\\Program Files\\qemu\\qemu-system-x86_64.exe',
-    'C:\\Program Files (x86)\\qemu\\qemu-system-x86_64.exe',
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'qemu', 'qemu-system-x86_64.exe'),
-  ];
-  for (const loc of locations) {
-    if (fs.existsSync(loc)) return loc;
+  if (process.platform === 'win32') {
+    try {
+      const result = execSync('where.exe qemu-system-x86_64', { timeout: 5000, stdio: 'pipe' });
+      return result.toString().trim().split('\n')[0].trim();
+    } catch (_) {}
+    const locations = [
+      'C:\\Program Files\\qemu\\qemu-system-x86_64.exe',
+      'C:\\Program Files (x86)\\qemu\\qemu-system-x86_64.exe',
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'qemu', 'qemu-system-x86_64.exe'),
+    ];
+    for (const loc of locations) {
+      if (fs.existsSync(loc)) return loc;
+    }
+  } else {
+    // Linux / macOS
+    try {
+      const result = execSync('which qemu-system-x86_64', { timeout: 5000, stdio: 'pipe' });
+      return result.toString().trim();
+    } catch (_) {}
   }
   return null;
 }
 
-/** 查找 qemu-img 工具 */
+/** 查找 qemu-img 工具（跨平台） */
 function findQemuImg(qemuPath) {
   if (!qemuPath) return null;
   const dir = path.dirname(qemuPath);
-  const imgPath = path.join(dir, 'qemu-img.exe');
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const imgPath = path.join(dir, `qemu-img${ext}`);
   if (fs.existsSync(imgPath)) return imgPath;
   return null;
 }
@@ -565,6 +571,62 @@ function sendPtyExit(code) {
   }
 }
 
+/** 自动安装 QEMU（Linux：检测包管理器） */
+function autoInstallQemuLinux() {
+  return new Promise((resolve) => {
+    let installCmd = null;
+    for (const [pm, cmd] of [
+      ['apt-get', 'apt-get install -y qemu-system-x86'],
+      ['dnf',     'dnf install -y qemu-kvm'],
+      ['yum',     'yum install -y qemu-kvm'],
+      ['pacman',  'pacman -S --noconfirm qemu-system-x86_64'],
+      ['zypper',  'zypper install -y qemu'],
+    ]) {
+      try {
+        execSync(`which ${pm}`, { stdio: 'pipe' });
+        installCmd = cmd;
+        break;
+      } catch (_) {}
+    }
+    if (!installCmd) {
+      sendPtyData('\x1b[31m未检测到支持的包管理器（apt/dnf/pacman/zypper），请手动安装 QEMU\x1b[0m\r\n');
+      return resolve(false);
+    }
+    // 尝试用 pkexec 提权；若不可用则直接运行（容器/root 环境）
+    let prefix = '';
+    try { execSync('which pkexec', { stdio: 'pipe' }); prefix = 'pkexec '; } catch (_) {}
+    const fullCmd = `${prefix}${installCmd}`;
+    sendPtyData(`\x1b[33m执行: ${fullCmd}\x1b[0m\r\n`);
+    const proc = spawn('sh', ['-c', fullCmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stdout.on('data', d => sendPtyData(d.toString()));
+    proc.stderr.on('data', d => sendPtyData(d.toString()));
+    proc.on('close', code => resolve(code === 0));
+    proc.on('error', () => resolve(false));
+  });
+}
+
+/** 自动安装 QEMU（Windows：winget） */
+function autoInstallQemuWindows() {
+  return new Promise((resolve) => {
+    try {
+      execSync('winget --version', { timeout: 5000, stdio: 'pipe' });
+    } catch (_) {
+      sendPtyData('\x1b[31mwinget 不可用，请手动下载安装 QEMU\x1b[0m\r\n');
+      sendPtyData('\x1b[33m下载地址: https://qemu.weilnetz.de/w64/\x1b[0m\r\n');
+      return resolve(false);
+    }
+    sendPtyData('\x1b[33m正在通过 winget 安装 QEMU，请耐心等待...\x1b[0m\r\n');
+    const proc = spawn('winget', [
+      'install', 'SoftwareFreedomConservancy.QEMU',
+      '--accept-package-agreements', '--accept-source-agreements', '--silent'
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    proc.stdout.on('data', d => sendPtyData(d.toString()));
+    proc.stderr.on('data', d => sendPtyData(d.toString()));
+    proc.on('close', code => resolve(code === 0));
+    proc.on('error', () => resolve(false));
+  });
+}
+
 /** 启动 PTY 进程（QEMU 虚拟机 / WSL 回退） */
 ipcMain.handle('pty-spawn', async (_event, cols, rows) => {
   vmLog(`pty-spawn called: cols=${cols} rows=${rows}`);
@@ -576,7 +638,21 @@ ipcMain.handle('pty-spawn', async (_event, cols, rows) => {
     }
     killQemu();
 
-    const qemuPath = findQemu();
+    let qemuPath = findQemu();
+
+    // ========== 未检测到 QEMU：自动安装 ==========
+    if (!qemuPath) {
+      sendPtyData('\x1b[33m未检测到 QEMU，开始自动安装...\x1b[0m\r\n');
+      const installed = process.platform === 'win32'
+        ? await autoInstallQemuWindows()
+        : await autoInstallQemuLinux();
+      if (installed) {
+        sendPtyData('\x1b[32mQEMU 安装成功！正在启动虚拟机...\x1b[0m\r\n');
+        qemuPath = findQemu();
+      } else {
+        sendPtyData('\x1b[31mQEMU 安装失败，回退到本地 Shell...\x1b[0m\r\n');
+      }
+    }
 
     if (qemuPath) {
       // ========== QEMU 真正独立虚拟机模式 ==========
@@ -630,13 +706,18 @@ ipcMain.handle('pty-spawn', async (_event, cols, rows) => {
 
       // 尝试硬件加速
       let accel = 'tcg';
-      try {
-        const whpxCheck = execSync(
-          'powershell -NoProfile -Command "(Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State"',
-          { timeout: 8000, stdio: 'pipe' }
-        ).toString().trim();
-        if (whpxCheck === 'Enabled') accel = 'whpx,kernel-irqchip=off';
-      } catch (_) {}
+      if (process.platform === 'win32') {
+        try {
+          const whpxCheck = execSync(
+            'powershell -NoProfile -Command "(Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State"',
+            { timeout: 8000, stdio: 'pipe' }
+          ).toString().trim();
+          if (whpxCheck === 'Enabled') accel = 'whpx,kernel-irqchip=off';
+        } catch (_) {}
+      } else {
+        // Linux: 检测 KVM
+        if (fs.existsSync('/dev/kvm')) accel = 'kvm';
+      }
       qemuArgs.push('-accel', accel);
 
       sendPtyData('\x1b[33m正在启动 Alpine Linux 虚拟机...\x1b[0m\r\n');
@@ -758,8 +839,21 @@ ipcMain.handle('pty-spawn', async (_event, cols, rows) => {
   }
 });
 
-/** 检测 WSL（WSL 回退用） */
+/** 检测可用 Shell（跨平台） */
 function detectShell() {
+  if (process.platform !== 'win32') {
+    // Linux / macOS：优先使用用户默认 shell，回退到 bash/sh
+    const userShell = process.env.SHELL;
+    if (userShell) return { shell: userShell, args: [], name: userShell.split('/').pop() };
+    for (const sh of ['/bin/bash', '/bin/zsh', '/bin/sh']) {
+      try {
+        execSync(`test -x ${sh}`, { stdio: 'pipe' });
+        return { shell: sh, args: [], name: sh.split('/').pop() };
+      } catch (_) {}
+    }
+    return { shell: '/bin/sh', args: [], name: 'sh' };
+  }
+  // Windows：优先检测 WSL，回退到 PowerShell
   try {
     execSync('wsl.exe --list --quiet', { timeout: 5000, stdio: 'pipe' });
     return { shell: 'wsl.exe', args: [], name: 'WSL' };
