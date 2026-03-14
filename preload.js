@@ -55,6 +55,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** 选择可执行文件 */
   selectExe: () => ipcRenderer.invoke('select-exe'),
 
+  /** 获取文件图标 */
+  getFileIcon: (filePath) => ipcRenderer.invoke('get-file-icon', filePath),
+
   /** 获取剪贴板文本 */
   getClipboardText: () => ipcRenderer.invoke('get-clipboard-text'),
 
@@ -87,4 +90,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Markdown 渲染（支持代码高亮和数学公式） */
   renderMarkdown: (mdText) => ipcRenderer.invoke('render-markdown', mdText),
+
+  // ==================== PTY 终端 / QEMU 虚拟机 ====================
+
+  /** 获取 VM 信息 */
+  vmGetInfo: () => ipcRenderer.invoke('vm-get-info'),
+
+  /** 安装 QEMU */
+  vmInstallQemu: () => ipcRenderer.invoke('vm-install-qemu'),
+
+  /** 启动 PTY 进程（QEMU VM 或 WSL 回退） */
+  ptySpawn: (cols, rows) => ipcRenderer.invoke('pty-spawn', cols, rows),
+
+  /** 写入 PTY */
+  ptyWrite: (data) => ipcRenderer.send('pty-write', data),
+
+  /** 调整 PTY 大小 */
+  ptyResize: (cols, rows) => ipcRenderer.send('pty-resize', cols, rows),
+
+  /** 终止 PTY */
+  ptyKill: () => ipcRenderer.send('pty-kill'),
+
+  /** 接收 PTY 数据 */
+  onPtyData: (callback) => {
+    ipcRenderer.removeAllListeners('pty-data');
+    ipcRenderer.on('pty-data', (_event, data) => callback(data));
+  },
+
+  /** 接收 PTY 退出事件 */
+  onPtyExit: (callback) => {
+    ipcRenderer.removeAllListeners('pty-exit');
+    ipcRenderer.on('pty-exit', (_event, code) => callback(code));
+  },
 });

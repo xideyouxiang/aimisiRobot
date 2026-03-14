@@ -45,8 +45,11 @@
     "electron-builder": "^24.9.1"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.38",
-    "marked": "^4.3.0"
+    "marked": "^4.3.0",
+    "node-pty": "^1.1.0",
+    "xterm": "^5.3.0"
   }
 }

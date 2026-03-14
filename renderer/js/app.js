@@ -11,6 +11,7 @@ import { BubbleView } from './views/BubbleView.js';
 import { ContextMenuView } from './views/ContextMenuView.js';
 import { ChatView } from './views/ChatView.js';
 import { QuickLaunchView } from './views/QuickLaunchView.js';
+import { TerminalView } from './views/TerminalView.js';
 import { loadDefaultImageGroups } from './defaults/DefaultPetImages.js';
 import { CoachService } from './utils/CoachService.js';
 
@@ -31,6 +32,7 @@ class App {
     this.contextMenuView = null;
     this.chatView = null;
     this.quickLaunchView = null;
+    this.terminalView = null;
     this.coachService = null;
   }
 
@@ -108,6 +110,11 @@ class App {
     const quickLaunchEl = document.getElementById('quick-launch');
     this.quickLaunchView = new QuickLaunchView(this.petVM, quickLaunchEl, () => this.save());
 
+    // Linux终端视图
+    const terminalEl = document.getElementById('terminal-panel');
+    this.terminalView = new TerminalView(terminalEl, this.displayOffsetX, this.displayOffsetY);
+    this.contextMenuView.setOnOpenTerminal(() => this.terminalView.toggle());
+
     // 5) 全局右键菜单
     petContainer.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -154,11 +161,15 @@ class App {
 
     // 6) 全局左键点击 - 宠物向点击位置移动
     document.addEventListener('click', (e) => {
-      // 排除菜单、气泡、宠物区域内的点击
+      // 排除菜单、气泡、宠物、终端、聊天面板区域内的点击
       const menuEl = document.getElementById('context-menu');
       if (menuEl.contains(e.target) || menuEl.classList.contains('visible')) return;
       if (document.getElementById('pet-container').contains(e.target)) return;
       if (document.getElementById('bubble').contains(e.target)) return;
+      const terminalEl = document.getElementById('terminal-panel');
+      if (terminalEl && terminalEl.contains(e.target)) return;
+      const chatEl = document.getElementById('chat-panel');
+      if (chatEl && chatEl.contains(e.target)) return;
 
       // 确保鼠标穿透已关闭时才触发（即宠物附近点击时）
       if (!this.petVM.get('isDragging') && !this.petVM.get('isFixed')) {

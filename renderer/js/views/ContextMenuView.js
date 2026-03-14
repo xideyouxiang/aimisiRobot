@@ -50,47 +50,59 @@ export class ContextMenuView {
     this._overlay.addEventListener("contextmenu", hideAll);
   }
 
-  /** 在宠物旁显示右键菜单（自动避开快捷启动菜单） */
+  /** 在宠物旁显示右键菜单（环形布局，以宠物为中心） */
   show(x, y) {
     this._currentPanel = null;
+
+    // 记录宠物中心坐标，供子面板定位使用
+    this._petCenterX = this.petVM.get("x") - this.displayOffsetX;
+    this._petCenterY = this.petVM.get("y") - this.displayOffsetY;
+
     this._renderMainMenu();
 
-    const menuW = 260;
-    const menuH = 420;
-    const petX = this.petVM.get("x") - this.displayOffsetX;
-    const petY = this.petVM.get("y") - this.displayOffsetY;
-    const petSize = this.petVM.get("petSize");
-    const qlW = 180;
-
-    const spaceRight = window.innerWidth - (petX + petSize / 2);
-    const spaceLeft = petX - petSize / 2;
-
-    let menuX, menuY;
-
-    if (spaceRight >= menuW + 16) {
-      // 右侧空间足够
-      menuX = petX + petSize / 2 + 12;
-    } else if (spaceLeft >= menuW + qlW + 32) {
-      // 左侧空间足够放两个菜单，右键菜单紧接快捷启动左侧不现实，直接放到宠物左侧
-      menuX = petX - petSize / 2 - menuW - 12;
-    } else {
-      // 都不够，放在屏幕右侧能放下的位置
-      menuX = Math.max(10, window.innerWidth - menuW - 10);
-    }
-
-    menuY = petY - menuH / 2;
-    menuY = Math.max(10, Math.min(window.innerHeight - menuH - 10, menuY));
-
-    this.menuEl.style.left = `${menuX}px`;
-    this.menuEl.style.top = `${menuY}px`;
     this.menuEl.classList.add("visible");
     this._overlay.classList.add("active");
     window.electronAPI.setIgnoreMouseEvents(false);
   }
 
+  /** 将菜单容器切换到环形布局（以宠物为中心） */
+  _applyRadialLayout() {
+    this.menuEl.classList.add('radial');
+    const size = 400;
+    let menuX = this._petCenterX - size / 2;
+    let menuY = this._petCenterY - size / 2;
+    menuX = Math.max(5, Math.min(window.innerWidth - size - 5, menuX));
+    menuY = Math.max(5, Math.min(window.innerHeight - size - 5, menuY));
+    this.menuEl.style.left = `${menuX}px`;
+    this.menuEl.style.top = `${menuY}px`;
+  }
+
+  /** 将菜单容器切换到传统面板布局（子菜单使用） */
+  _applyPanelLayout() {
+    this.menuEl.classList.remove('radial');
+    const menuW = 260;
+    const menuH = 420;
+    const petX = this._petCenterX;
+    const petY = this._petCenterY;
+    const petSize = this.petVM.get("petSize");
+
+    const spaceRight = window.innerWidth - (petX + petSize / 2);
+    let menuX;
+    if (spaceRight >= menuW + 16) {
+      menuX = petX + petSize / 2 + 12;
+    } else {
+      menuX = Math.max(10, petX - petSize / 2 - menuW - 12);
+    }
+    menuX = Math.max(10, Math.min(window.innerWidth - menuW - 10, menuX));
+    let menuY = petY - menuH / 2;
+    menuY = Math.max(10, Math.min(window.innerHeight - menuH - 10, menuY));
+    this.menuEl.style.left = `${menuX}px`;
+    this.menuEl.style.top = `${menuY}px`;
+  }
+
   /** 隐藏右键菜单（同时关闭快捷启动菜单） */
   hide() {
-    this.menuEl.classList.remove("visible");
+    this.menuEl.classList.remove("visible", "radial");
     const qlEl = document.getElementById("quick-launch");
     if (qlEl) qlEl.classList.remove("visible");
     this._overlay.classList.remove("active");
@@ -99,7 +111,7 @@ export class ContextMenuView {
 
   /** 隐藏所有菜单（遮罩点击时调用） */
   hideAll() {
-    this.menuEl.classList.remove("visible");
+    this.menuEl.classList.remove("visible", "radial");
     const qlEl = document.getElementById("quick-launch");
     if (qlEl) qlEl.classList.remove("visible");
     this._overlay.classList.remove("active");
@@ -113,31 +125,53 @@ export class ContextMenuView {
     const moodEmoji = this.petVM.getMoodEmoji();
     const moodLevel = Math.round(this.petVM.get("moodLevel"));
     const autoMove = this.petVM.get("autoMoveEnabled");
-    const alwaysOnTop = this.petVM.get("alwaysOnTop");
-    this.menuEl.innerHTML = `
-      <div class="menu-title">🐾 桌面宠物 <span class="mood-status">${moodEmoji} ${moodLevel}%</span></div>
-      <div class="menu-item" data-action="todo">📋 待办事项</div>
-      <div class="menu-item" data-action="automove">🧭 自主移动 ${autoMove ? "✅" : "❌"}</div>
-      <div class="menu-item" data-action="coach">🏋️ 桌面教练 ${this.petVM.get('coachEnabled') ? '✅' : '❌'}</div>
-      <div class="menu-item" data-action="aichat">🤖 和小爱聊天</div>
-      <div class="menu-item menu-has-sub" data-action="settings">⚙️ 设置 <span class="menu-arrow">›</span></div>
-      <div class="menu-item menu-has-sub" data-action="aitools">🧠 AI 工具 <span class="menu-arrow">›</span></div>
-      <div class="menu-divider"></div>
-      <div class="menu-item" data-action="pin">${isFixed ? "📌 取消固定" : "📍 固定在此处"}</div>
-   
-      <div class="menu-item" data-action="coolmode">😎 切换酷炫模式</div>
-      <div class="menu-item menu-item-danger" data-action="quit">❌ 退出</div>
-    `;
-    //  <div class="menu-item" data-action="layertoggle">${alwaysOnTop ? "🔽 取消置顶" : "🔼 置顶显示"}</div>
-    this.menuEl.querySelectorAll(".menu-item").forEach((item) => {
-      item.addEventListener("click", (e) => {
-        const action = item.dataset.action;
-        this._handleAction(action);
-      });
+    const coachEnabled = this.petVM.get('coachEnabled');
+
+    const items = [
+      { icon: '📋', label: '待办事项', action: 'todo' },
+      { icon: '🧭', label: '自主移动', action: 'automove', status: autoMove ? '✅' : '❌' },
+      { icon: '🏋️', label: '桌面教练', action: 'coach', status: coachEnabled ? '✅' : '❌' },
+      { icon: '🤖', label: '聊天', action: 'aichat' },
+      { icon: '🐧', label: 'Linux终端', action: 'terminal' },
+      { icon: '⚙️', label: '设置', action: 'settings' },
+      { icon: '🧠', label: 'AI 工具', action: 'aitools' },
+      { icon: isFixed ? '📌' : '📍', label: isFixed ? '取消固定' : '固定位置', action: 'pin' },
+      { icon: '😎', label: '酷炫模式', action: 'coolmode' },
+      { icon: '❌', label: '退出', action: 'quit', danger: true },
+    ];
+
+    const radius = 120;
+    const centerX = 200;
+    const centerY = 200;
+    const angleStep = (2 * Math.PI) / items.length;
+    const startAngle = -Math.PI / 2;
+
+    let html = `<div class="radial-ring"></div>`;
+    html += `<div class="radial-center"><span class="radial-mood">${moodEmoji}</span><span class="radial-mood-text">${moodLevel}%</span></div>`;
+
+    items.forEach((item, i) => {
+      const angle = startAngle + i * angleStep;
+      const x = centerX + Math.cos(angle) * radius;
+      const y = centerY + Math.sin(angle) * radius;
+      const delay = (0.08 + i * 0.045).toFixed(3);
+      html += `<div class="radial-item${item.danger ? ' radial-item-danger' : ''}" data-action="${item.action}" data-label="${item.label}" style="left:${x.toFixed(1)}px;top:${y.toFixed(1)}px;--delay:${delay}s"><span class="radial-icon">${item.icon}</span>${item.status ? `<span class="radial-status">${item.status}</span>` : ''}</div>`;
+    });
+
+    this.menuEl.innerHTML = html;
+    this._applyRadialLayout();
+
+    this.menuEl.querySelectorAll('.radial-item').forEach(el => {
+      el.addEventListener('click', () => this._handleAction(el.dataset.action));
     });
   }
 
   _handleAction(action) {
+    // 进入子面板时切换为传统面板布局
+    const panelActions = ['todo', 'settings', 'images', 'movement', 'automove', 'keybind', 'bubble', 'aisetting', 'aitools', 'ai-screen', 'ai-clipboard'];
+    if (panelActions.includes(action)) {
+      this._applyPanelLayout();
+    }
+
     switch (action) {
       case "todo":
         this._renderTodoPanel();
@@ -168,6 +202,10 @@ export class ContextMenuView {
       case "aichat":
         this.hideAll();
         if (this._onOpenChat) this._onOpenChat();
+        break;
+      case "terminal":
+        this.hideAll();
+        if (this._onOpenTerminal) this._onOpenTerminal();
         break;
       case "aisetting":
         this._renderAISettingPanel();
@@ -380,7 +418,8 @@ export class ContextMenuView {
 
   /** 显示文件操作选项菜单 */
   showFileActions(filePath) {
-    // 隐藏快捷启动菜单
+    // 切换为面板布局 & 隐藏快捷启动菜单
+    this.menuEl.classList.remove('radial');
     const qlEl = document.getElementById("quick-launch");
     if (qlEl) qlEl.classList.remove("visible");
 
@@ -954,6 +993,11 @@ export class ContextMenuView {
   /** 设置打开聊天的回调 */
   setOnOpenChat(fn) {
     this._onOpenChat = fn;
+  }
+
+  /** 设置打开终端的回调 */
+  setOnOpenTerminal(fn) {
+    this._onOpenTerminal = fn;
   }
 
   // ==================== AI 设置面板 ====================

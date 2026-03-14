@@ -4,15 +4,23 @@
 const { app, BrowserWindow, ipcMain, screen, globalShortcut, dialog, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
+const net = require('net');
+const { execSync, spawn } = require('child_process');
 
 const { marked } = require('marked');
 const hljs = require('highlight.js');
 const katex = require('katex');
+const pty = require('node-pty');
 
 const DATA_PATH = path.join(app.getPath('userData'), 'pet-data.json');
 
 let mainWindow = null;
 const allWindows = [];
+let ptyProcess = null;
+let qemuProcess = null;   // QEMU child process
+let qemuSocket = null;    // TCP socket to QEMU serial
 
 /** 计算所有屏幕的综合边界 */
 function getAllDisplayBounds() {
@@ -70,7 +78,9 @@ function createWindows() {
     });
 
     allWindows.push(win);
-    if (isPrimary) mainWindow = win;
+    if (isPrimary) {
+      mainWindow = win;
+    }
   }
 }
 
@@ -289,6 +299,16 @@ ipcMain.handle('select-exe', async () => {
   return result.filePaths[0];
 });
 
+/** 获取文件图标（返回 NativeImage 的 Data URL） */
+ipcMain.handle('get-file-icon', async (_event, filePath) => {
+  try {
+    const icon = await app.getFileIcon(filePath, { size: 'large' });
+    return icon.toDataURL();
+  } catch {
+    return null;
+  }
+});
+
 /** 获取剪贴板文本 */
 ipcMain.handle('get-clipboard-text', async () => {
   return clipboard.readText();
@@ -381,6 +401,397 @@ ipcMain.handle('ai-chat', async (_event, { apiUrl, apiKey, model, messages, maxT
   }
 });
 
+// ==================== QEMU 虚拟机（Linux 独立虚拟机） ====================
+
+const VM_DIR = path.join(app.getPath('userData'), 'vm');
+const ALPINE_ISO_PATH = path.join(VM_DIR, 'alpine-virt.iso');
+const DISK_IMAGE_PATH = path.join(VM_DIR, 'alpine.qcow2');
+const DISK_SIZE = '4G';
+const VM_MEMORY = '512';
+const ALPINE_ISO_URL = 'https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.6-x86_64.iso';
+
+/** 查找 QEMU 可执行文件 */
+function findQemu() {
+  // 检查 PATH
+  try {
+    const result = execSync('where.exe qemu-system-x86_64', { timeout: 5000, stdio: 'pipe' });
+    return result.toString().trim().split('\n')[0].trim();
+  } catch (_) {}
+
+  // 常见安装位置
+  const locations = [
+    'C:\\Program Files\\qemu\\qemu-system-x86_64.exe',
+    'C:\\Program Files (x86)\\qemu\\qemu-system-x86_64.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'qemu', 'qemu-system-x86_64.exe'),
+  ];
+  for (const loc of locations) {
+    if (fs.existsSync(loc)) return loc;
+  }
+  return null;
+}
+
+/** 查找 qemu-img 工具 */
+function findQemuImg(qemuPath) {
+  if (!qemuPath) return null;
+  const dir = path.dirname(qemuPath);
+  const imgPath = path.join(dir, 'qemu-img.exe');
+  if (fs.existsSync(imgPath)) return imgPath;
+  return null;
+}
+
+/** 下载文件（支持重定向） */
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(path.dirname(dest))) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+    }
+    const file = fs.createWriteStream(dest);
+    const doRequest = (reqUrl) => {
+      const mod = reqUrl.startsWith('https') ? https : http;
+      mod.get(reqUrl, (resp) => {
+        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+          resp.resume();
+          doRequest(resp.headers.location);
+          return;
+        }
+        if (resp.statusCode !== 200) {
+          file.close();
+          fs.unlinkSync(dest);
+          reject(new Error(`HTTP ${resp.statusCode}`));
+          return;
+        }
+        const total = parseInt(resp.headers['content-length'], 10) || 0;
+        let downloaded = 0;
+        resp.on('data', (chunk) => {
+          downloaded += chunk.length;
+          if (onProgress && total > 0) {
+            onProgress(Math.round((downloaded / total) * 100));
+          }
+        });
+        resp.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
+      }).on('error', (e) => {
+        file.close();
+        try { fs.unlinkSync(dest); } catch (_) {}
+        reject(e);
+      });
+    };
+    doRequest(url);
+  });
+}
+
+/** 创建磁盘镜像 */
+function createDiskImage(qemuImgPath) {
+  if (fs.existsSync(DISK_IMAGE_PATH)) return;
+  if (!fs.existsSync(VM_DIR)) fs.mkdirSync(VM_DIR, { recursive: true });
+  execSync(`"${qemuImgPath}" create -f qcow2 "${DISK_IMAGE_PATH}" ${DISK_SIZE}`, { stdio: 'pipe' });
+}
+
+/** 获取 VM 状态信息 */
+ipcMain.handle('vm-get-info', async () => {
+  const qemuPath = findQemu();
+  return {
+    qemuInstalled: !!qemuPath,
+    qemuPath,
+    isoExists: fs.existsSync(ALPINE_ISO_PATH),
+    diskExists: fs.existsSync(DISK_IMAGE_PATH),
+    vmRunning: !!ptyProcess,
+  };
+});
+
+/** 安装 QEMU（通过 winget） */
+ipcMain.handle('vm-install-qemu', async () => {
+  try {
+    execSync('winget --version', { timeout: 5000, stdio: 'pipe' });
+  } catch (_) {
+    return { error: 'winget 不可用，请手动安装 QEMU.\n下载地址: https://qemu.weilnetz.de/w64/' };
+  }
+  try {
+    // 使用 winget 安装 QEMU（需要用户确认）
+    const { exec } = require('child_process');
+    exec('winget install SoftwareFreedomConservancy.QEMU --accept-package-agreements --accept-source-agreements');
+    return { success: true, message: 'QEMU 正在安装中，请等待安装完成后重新启动...' };
+  } catch (e) {
+    return { error: `安装失败: ${e.message}` };
+  }
+});
+
+/** 停止 QEMU 虚拟机 */
+function killQemu() {
+  if (qemuSocket) {
+    try { qemuSocket.destroy(); } catch (_) {}
+    qemuSocket = null;
+  }
+  if (qemuProcess) {
+    try { qemuProcess.kill(); } catch (_) {}
+    qemuProcess = null;
+  }
+}
+
+/** 查找空闲 TCP 端口 */
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+/** 调试日志写入文件 */
+const LOG_FILE = path.join(app.getPath('userData'), 'vm-debug.log');
+function vmLog(msg) {
+  const ts = new Date().toISOString();
+  fs.appendFileSync(LOG_FILE, `[${ts}] ${msg}\n`);
+}
+
+/** 向所有窗口发送终端数据 */
+function sendPtyData(data) {
+  for (const win of allWindows) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('pty-data', data);
+    }
+  }
+}
+
+/** 向所有窗口发送终端退出事件 */
+function sendPtyExit(code) {
+  for (const win of allWindows) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('pty-exit', code);
+    }
+  }
+}
+
+/** 启动 PTY 进程（QEMU 虚拟机 / WSL 回退） */
+ipcMain.handle('pty-spawn', async (_event, cols, rows) => {
+  vmLog(`pty-spawn called: cols=${cols} rows=${rows}`);
+  try {
+    // 如果已有进程，先终止
+    if (ptyProcess) {
+      try { ptyProcess.kill(); } catch (_) {}
+      ptyProcess = null;
+    }
+    killQemu();
+
+    const qemuPath = findQemu();
+
+    if (qemuPath) {
+      // ========== QEMU 真正独立虚拟机模式 ==========
+      const qemuImgPath = findQemuImg(qemuPath);
+
+      // 确保 VM 目录存在
+      if (!fs.existsSync(VM_DIR)) fs.mkdirSync(VM_DIR, { recursive: true });
+
+      // 下载 Alpine ISO（如果不存在）
+      if (!fs.existsSync(ALPINE_ISO_PATH)) {
+        sendPtyData('\x1b[33m正在下载 Alpine Linux ISO...\x1b[0m\r\n');
+        try {
+          await downloadFile(ALPINE_ISO_URL, ALPINE_ISO_PATH, (pct) => {
+            sendPtyData(`\r\x1b[33m下载进度: ${pct}%\x1b[0m`);
+          });
+          sendPtyData('\r\n\x1b[32mISO 下载完成！\x1b[0m\r\n');
+        } catch (e) {
+          return { error: `下载 Alpine ISO 失败: ${e.message}`, hint: '请检查网络连接' };
+        }
+      }
+
+      // 创建磁盘镜像（如果不存在）
+      if (qemuImgPath && !fs.existsSync(DISK_IMAGE_PATH)) {
+        try {
+          createDiskImage(qemuImgPath);
+        } catch (e) {
+          return { error: `创建磁盘镜像失败: ${e.message}` };
+        }
+      }
+
+      // 找空闲端口用于串口TCP连接
+      const serialPort = await findFreePort();
+
+      // 构建 QEMU 命令参数（串口走 TCP）
+      const qemuArgs = [
+        '-m', VM_MEMORY,
+        '-nographic',
+        '-serial', `tcp:127.0.0.1:${serialPort},server=on,wait=off`,
+        '-boot', 'order=cd',
+        '-cdrom', ALPINE_ISO_PATH,
+      ];
+
+      // 如果有磁盘镜像，添加硬盘
+      if (fs.existsSync(DISK_IMAGE_PATH)) {
+        qemuArgs.push('-drive', `file=${DISK_IMAGE_PATH},format=qcow2,if=virtio`);
+      }
+
+      // 网络：用户态NAT模式
+      qemuArgs.push('-netdev', 'user,id=net0,hostfwd=tcp::2222-:22');
+      qemuArgs.push('-device', 'virtio-net-pci,netdev=net0');
+
+      // 尝试硬件加速
+      let accel = 'tcg';
+      try {
+        const whpxCheck = execSync(
+          'powershell -NoProfile -Command "(Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State"',
+          { timeout: 8000, stdio: 'pipe' }
+        ).toString().trim();
+        if (whpxCheck === 'Enabled') accel = 'whpx,kernel-irqchip=off';
+      } catch (_) {}
+      qemuArgs.push('-accel', accel);
+
+      sendPtyData('\x1b[33m正在启动 Alpine Linux 虚拟机...\x1b[0m\r\n');
+      vmLog(`Spawning QEMU: ${qemuPath} ${qemuArgs.join(' ')}`);
+
+      // 用 child_process.spawn 启动 QEMU（非 PTY，因为 Windows 下 node-pty + QEMU 有兼容问题）
+      qemuProcess = spawn(qemuPath, qemuArgs, {
+        cwd: VM_DIR,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+
+      qemuProcess.on('error', (err) => {
+        vmLog(`QEMU error: ${err.message}`);
+        sendPtyData(`\r\n\x1b[31mQEMU 启动失败: ${err.message}\x1b[0m\r\n`);
+        sendPtyExit(1);
+        qemuProcess = null;
+      });
+
+      // 注意：Windows 下 child_process.spawn 的 exit 事件可能会误触发
+      // （QEMU 进程仍然在运行但 Node 认为它已退出）
+      // 因此不在这里调用 sendPtyExit，完全依赖 TCP 串口的 end/error 事件判断 VM 状态
+      qemuProcess.on('exit', (code) => {
+        vmLog(`QEMU process exit event: code=${code} (ignored - using TCP socket for lifecycle)`);
+        qemuProcess = null;
+      });
+
+      // 转发 QEMU 的 stderr 到终端（显示启动信息/错误）
+      qemuProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        // 只转发重要错误信息，忽略常见的 warning
+        if (text.includes('error') || text.includes('Error') || text.includes('failed')) {
+          sendPtyData(`\x1b[31m${text}\x1b[0m`);
+        }
+      });
+
+      // 等待 QEMU 启动，然后通过 TCP 连接串口
+      vmLog(`Waiting 1.5s before TCP connect to port ${serialPort}`);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      // 连接 QEMU 串口 TCP
+      return new Promise((resolve) => {
+        const connectSerial = (retries) => {
+          const sock = net.createConnection({ host: '127.0.0.1', port: serialPort }, () => {
+            vmLog(`TCP connected to serial port ${serialPort}`);
+            qemuSocket = sock;
+
+            // 串口数据 -> 渲染进程（用 Buffer 避免编码问题）
+            sock.on('data', (chunk) => {
+              const text = chunk.toString('utf-8');
+              sendPtyData(text);
+            });
+
+            sock.on('end', () => {
+              vmLog('TCP serial socket ended - VM disconnected');
+              sendPtyData('\r\n\x1b[33m[虚拟机串口已断开]\x1b[0m\r\n');
+              sendPtyExit(0);
+              qemuSocket = null;
+            });
+
+            sock.on('error', (err) => {
+              vmLog(`TCP serial socket error: ${err.message}`);
+              sendPtyData(`\r\n\x1b[31m串口连接错误: ${err.message}\x1b[0m\r\n`);
+              sendPtyExit(1);
+              qemuSocket = null;
+            });
+
+            sendPtyData('\x1b[32m已连接到 Alpine Linux 虚拟机串口，正在启动...\x1b[0m\r\n');
+            // 发送回车触发 login prompt 显示
+            setTimeout(() => {
+              if (qemuSocket && !qemuSocket.destroyed) {
+                qemuSocket.write('\r\n');
+              }
+            }, 3000);
+
+            resolve({ success: true, shell: 'QEMU Alpine Linux VM', mode: 'qemu' });
+          });
+
+          sock.on('error', (connErr) => {
+            vmLog(`TCP connect error (retries=${retries}): ${connErr.message}`);
+            if (retries > 0) {
+              setTimeout(() => connectSerial(retries - 1), 1000);
+            } else {
+              sendPtyData('\x1b[31m无法连接虚拟机串口\x1b[0m\r\n');
+              resolve({ error: '无法连接虚拟机串口', hint: 'QEMU 可能启动失败' });
+            }
+          });
+        };
+        connectSerial(10);
+      });
+
+    } else {
+      // ========== WSL 回退模式 ==========
+      const detected = detectShell();
+
+      ptyProcess = pty.spawn(detected.shell, detected.args, {
+        name: 'xterm-256color',
+        cols: cols || 80,
+        rows: rows || 24,
+        cwd: process.env.HOME || process.env.USERPROFILE,
+        env: process.env,
+      });
+
+      ptyProcess.onData((data) => { sendPtyData(data); });
+      ptyProcess.onExit(({ exitCode }) => {
+        sendPtyExit(exitCode);
+        ptyProcess = null;
+      });
+
+      return {
+        success: true,
+        shell: detected.name,
+        mode: 'wsl-fallback',
+        hint: '未检测到 QEMU，使用 WSL 模式。安装 QEMU 可获得独立虚拟机体验。'
+      };
+    }
+  } catch (e) {
+    return { error: e.message, hint: '请确保已安装 QEMU 或 WSL' };
+  }
+});
+
+/** 检测 WSL（WSL 回退用） */
+function detectShell() {
+  try {
+    execSync('wsl.exe --list --quiet', { timeout: 5000, stdio: 'pipe' });
+    return { shell: 'wsl.exe', args: [], name: 'WSL' };
+  } catch (_) {}
+  return { shell: 'powershell.exe', args: ['-NoLogo'], name: 'PowerShell' };
+}
+
+/** 渲染进程 -> PTY/VM 写入数据 */
+ipcMain.on('pty-write', (_event, data) => {
+  if (qemuSocket && !qemuSocket.destroyed) {
+    qemuSocket.write(data);
+  } else if (ptyProcess) {
+    ptyProcess.write(data);
+  }
+});
+
+/** 调整 PTY 尺寸（仅 WSL 模式有效） */
+ipcMain.on('pty-resize', (_event, cols, rows) => {
+  if (ptyProcess) {
+    try { ptyProcess.resize(cols, rows); } catch (_) {}
+  }
+});
+
+/** 终止 PTY/VM 进程 */
+ipcMain.on('pty-kill', () => {
+  killQemu();
+  if (ptyProcess) {
+    try { ptyProcess.kill(); } catch (_) {}
+    ptyProcess = null;
+  }
+});
+
 // ==================== 生命周期 ====================
 
 app.whenReady().then(createWindows);
@@ -392,4 +803,9 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  killQemu();
+  if (ptyProcess) {
+    try { ptyProcess.kill(); } catch (_) {}
+    ptyProcess = null;
+  }
 });

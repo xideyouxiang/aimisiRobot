@@ -23,33 +23,35 @@ export class QuickLaunchView {
     });
   }
 
-  /** 显示快捷启动菜单（自动避开右键菜单） */
-  show(petX, petY, petSize) {
+  /** 显示快捷启动菜单（智能定位：优先下方，空间不够则左侧） */
+  async show(petX, petY, petSize) {
     this._visible = true;
-    this._render();
+    await this._render();
 
-    const menuW = 180;
-    const menuH = this.launchEl.scrollHeight || 300;
-    const spaceLeft = petX - petSize / 2;
-    const spaceRight = window.innerWidth - (petX + petSize / 2);
-    const ctxMenuW = 260;
+    const radialRadius = 210;
+    // 渲染后获取实际尺寸
+    const menuW = this.launchEl.scrollWidth || 400;
+    const menuH = this.launchEl.scrollHeight || 80;
 
     let mx, my;
+    const spaceBelow = window.innerHeight - (petY + radialRadius);
 
-    if (spaceLeft >= menuW + 16) {
-      // 左侧空间足够
-      mx = petX - petSize / 2 - menuW - 12;
-    } else if (spaceRight >= menuW + ctxMenuW + 32) {
-      // 左侧不够但右侧能放两个菜单 — 放到右键菜单更右侧
-      mx = petX + petSize / 2 + ctxMenuW + 24;
+    if (spaceBelow >= menuH + 20) {
+      // 下方空间足够：水平居中放在环形菜单下方
+      mx = petX - menuW / 2;
+      my = petY + radialRadius + 12;
     } else {
-      // 都紧张，放在宠物上方或下方（左对齐）
-      mx = Math.max(10, petX - menuW / 2);
-      mx = Math.min(mx, window.innerWidth - menuW - 10);
+      // 下方不够：放到左侧
+      mx = petX - radialRadius - menuW - 12;
+      my = petY - menuH / 2;
+      if (mx < 5) {
+        // 左侧也不够，放右侧
+        mx = petX + radialRadius + 12;
+      }
     }
 
-    my = petY - menuH / 2;
-    my = Math.max(10, Math.min(window.innerHeight - menuH - 10, my));
+    mx = Math.max(5, Math.min(window.innerWidth - menuW - 5, mx));
+    my = Math.max(5, Math.min(window.innerHeight - menuH - 5, my));
 
     this.launchEl.style.left = `${mx}px`;
     this.launchEl.style.top = `${my}px`;
@@ -63,44 +65,49 @@ export class QuickLaunchView {
     window.electronAPI.setIgnoreMouseEvents(true, { forward: true });
   }
 
-  toggle(petX, petY, petSize) {
+  async toggle(petX, petY, petSize) {
     if (this._visible) {
       this.hide();
     } else {
-      this.show(petX, petY, petSize);
+      await this.show(petX, petY, petSize);
     }
   }
 
-  _render() {
+  async _render() {
     const apps = this.petVM.get('quickLaunchApps') || [];
     const wechatPath = this.petVM.get('wechatPath') || '';
 
+    // 异步获取所有应用图标
+    const icons = await Promise.all(
+      apps.map(app => this._getIconDataUrl(app.path))
+    );
+    const wechatIcon = wechatPath ? await this._getIconDataUrl(wechatPath) : null;
+
     this.launchEl.innerHTML = `
-      <div class="ql-title">🚀 快捷启动</div>
-      <div class="ql-list">
+      <div class="ql-dock">
         ${apps.map((app, i) => `
-          <div class="ql-item" data-index="${i}" title="${this._escapeHtml(app.path)}">
-            <span class="ql-icon">📄</span>
-            <span class="ql-name">${this._escapeHtml(app.name)}</span>
-            <span class="ql-remove" data-index="${i}" title="移除">✕</span>
+          <div class="ql-dock-item" data-index="${i}" title="${this._escapeHtml(app.name)}\n${this._escapeHtml(app.path)}">
+            <img class="ql-dock-icon" src="${icons[i] || ''}" alt="" draggable="false" />
+            <span class="ql-dock-label">${this._escapeHtml(app.name)}</span>
+            <span class="ql-dock-remove" data-index="${i}">✕</span>
           </div>
         `).join('')}
-        ${apps.length === 0 ? '<div class="ql-empty">暂无快捷方式</div>' : ''}
-      </div>
-      <div class="ql-divider"></div>
-      <div class="ql-item ql-action" data-action="add">
-        <span class="ql-icon">➕</span>
-        <span class="ql-name">添加软件</span>
-      </div>
-      <div class="ql-divider"></div>
-      <div class="ql-section-title">💬 微信多开</div>
-      <div class="ql-wechat-path">
-        <span class="ql-wechat-text">${wechatPath ? this._escapeHtml(this._getFileName(wechatPath)) : '未设置路径'}</span>
-        <span class="ql-wechat-browse" title="选择微信路径">📂</span>
-      </div>
-      <div class="ql-item ql-action ql-wechat-btn" data-action="wechat" ${!wechatPath ? 'style="opacity: 0.5"' : ''}>
-        <span class="ql-icon">💬</span>
-        <span class="ql-name">启动新微信</span>
+        ${wechatPath ? `
+          <div class="ql-dock-sep"></div>
+          <div class="ql-dock-item" data-action="wechat" title="启动新微信">
+            <img class="ql-dock-icon" src="${wechatIcon || ''}" alt="" draggable="false" />
+            <span class="ql-dock-label">微信多开</span>
+          </div>
+        ` : ''}
+        <div class="ql-dock-sep"></div>
+        <div class="ql-dock-item ql-dock-add" data-action="add" title="添加软件">
+          <span class="ql-dock-icon-emoji">➕</span>
+          <span class="ql-dock-label">添加</span>
+        </div>
+        <div class="ql-dock-item ql-dock-add" data-action="wechat-path" title="${wechatPath ? '更换微信路径' : '设置微信路径'}">
+          <span class="ql-dock-icon-emoji">💬</span>
+          <span class="ql-dock-label">${wechatPath ? '换微信' : '设微信'}</span>
+        </div>
       </div>
     `;
 
@@ -109,9 +116,9 @@ export class QuickLaunchView {
 
   _bindEvents() {
     // 点击启动应用
-    this.launchEl.querySelectorAll('.ql-item[data-index]').forEach(el => {
+    this.launchEl.querySelectorAll('.ql-dock-item[data-index]').forEach(el => {
       el.addEventListener('click', (e) => {
-        if (e.target.classList.contains('ql-remove')) return;
+        if (e.target.classList.contains('ql-dock-remove')) return;
         const apps = this.petVM.get('quickLaunchApps') || [];
         const index = parseInt(el.dataset.index);
         if (apps[index]) {
@@ -121,7 +128,7 @@ export class QuickLaunchView {
     });
 
     // 移除应用
-    this.launchEl.querySelectorAll('.ql-remove').forEach(el => {
+    this.launchEl.querySelectorAll('.ql-dock-remove').forEach(el => {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         const apps = [...(this.petVM.get('quickLaunchApps') || [])];
@@ -133,7 +140,8 @@ export class QuickLaunchView {
     });
 
     // 添加软件
-    this.launchEl.querySelector('[data-action="add"]').addEventListener('click', async () => {
+    const addBtn = this.launchEl.querySelector('[data-action="add"]');
+    if (addBtn) addBtn.addEventListener('click', async () => {
       const exePath = await window.electronAPI.selectExe();
       if (!exePath) return;
       const name = this._getFileName(exePath);
@@ -143,8 +151,9 @@ export class QuickLaunchView {
       this._render();
     });
 
-    // 选择微信路径
-    this.launchEl.querySelector('.ql-wechat-browse').addEventListener('click', async () => {
+    // 设置/更换微信路径
+    const wpBtn = this.launchEl.querySelector('[data-action="wechat-path"]');
+    if (wpBtn) wpBtn.addEventListener('click', async () => {
       const exePath = await window.electronAPI.selectExe();
       if (!exePath) return;
       this.petVM.set('wechatPath', exePath);
@@ -153,12 +162,27 @@ export class QuickLaunchView {
     });
 
     // 微信多开
-    this.launchEl.querySelector('[data-action="wechat"]').addEventListener('click', () => {
+    const wcBtn = this.launchEl.querySelector('[data-action="wechat"]');
+    if (wcBtn) wcBtn.addEventListener('click', () => {
       const wechatPath = this.petVM.get('wechatPath');
       if (wechatPath) {
         window.electronAPI.launchWechatMulti(wechatPath);
       }
     });
+  }
+
+  /** 获取文件图标 DataURL（带缓存） */
+  async _getIconDataUrl(filePath) {
+    if (!filePath) return null;
+    if (!this._iconCache) this._iconCache = {};
+    if (this._iconCache[filePath]) return this._iconCache[filePath];
+    try {
+      const dataUrl = await window.electronAPI.getFileIcon(filePath);
+      if (dataUrl) this._iconCache[filePath] = dataUrl;
+      return dataUrl;
+    } catch {
+      return null;
+    }
   }
 
   _getFileName(filePath) {
