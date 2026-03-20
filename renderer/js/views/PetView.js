@@ -177,7 +177,7 @@ export class PetView {
     this.container.style.left = `${x - size / 2}px`;
     this.container.style.top = `${y - size / 2}px`;
 
-    // 检测宠物是否在当前显示器范围内
+    // 检测宠物是否在当前显示器范围内`
     const isOnScreen = x > -size && x < window.innerWidth + size &&
                        y > -size && y < window.innerHeight + size;
     if (isOnScreen !== this._petOnScreen) {
