@@ -79,6 +79,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('pet-state', (_event, state) => callback(state));
   },
 
+  /** 向副屏广播设置变更（AI配置、外观等） */
+  broadcastSettings: (settings) => ipcRenderer.send('broadcast-settings', settings),
+
+  /** 副屏监听设置变更 */
+  onSettingsUpdated: (callback) => {
+    ipcRenderer.removeAllListeners('settings-updated');
+    ipcRenderer.on('settings-updated', (_event, settings) => callback(settings));
+  },
+
   /** 副屏将输入事件中转到主窗口 */
   relayInput: (type, x, y) => ipcRenderer.send('relay-secondary-input', type, x, y),
 

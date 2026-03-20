@@ -275,6 +275,24 @@ class App {
       }
     });
 
+    // 监听主屏设置变更（如AI配置、外观），同步到本地 petVM
+    window.electronAPI.onSettingsUpdated((settings) => {
+      const settingsKeys = [
+        'aiApiUrl', 'aiApiKey', 'aiModel', 'aiMaxTokens', 'aiSystemPrompt',
+        'petSize', 'movementSpeed', 'bubbleEnabled', 'bubbleMinInterval', 'bubbleMaxInterval',
+        'bubbleGroupKey', 'keyBindings', 'quickLaunchApps', 'wechatPath',
+        'alwaysOnTop', 'alwaysOnTopKey', 'coachEnabled',
+        'autoMoveMinIdle', 'autoMoveMaxIdle', 'autoMoveRange',
+        'idleGroupKey', 'walkGroupKey', 'dragGroupKey', 'clickGroupKey',
+        'fixedGroupKey', 'coolGroupKey', 'happyGroupKey', 'blinkGroupKey',
+      ];
+      for (const key of settingsKeys) {
+        if (settings[key] !== undefined) {
+          this.petVM.set(key, settings[key]);
+        }
+      }
+    });
+
     // 副屏移动到移动结束时，将最终位置同步回主屏
     this.petVM.subscribe('isMoving', (isMoving) => {
       if (!isMoving) {
@@ -360,6 +378,10 @@ class App {
       todos: this.todoVM.toJSON()
     };
     await window.electronAPI.saveData(data);
+    // 主屏将最新配置（如AI设置）同步到副屏
+    if (!this.isSecondary) {
+      window.electronAPI.broadcastSettings(data.pet);
+    }
   }
 }
 

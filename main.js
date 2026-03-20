@@ -361,6 +361,15 @@ ipcMain.on('broadcast-pet-state', (_event, state) => {
   }
 });
 
+/** 将设置变更广播给所有副屏窗口（AI配置、外观等） */
+ipcMain.on('broadcast-settings', (_event, settings) => {
+  for (const win of allWindows) {
+    if (win && !win.isDestroyed() && win !== mainWindow) {
+      win.webContents.send('settings-updated', settings);
+    }
+  }
+});
+
 /** 将副屏的用户交互转发到主窗口 */
 ipcMain.on('relay-secondary-input', (_event, type, x, y) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
